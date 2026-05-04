@@ -122,11 +122,34 @@ require_command() {
 
 # TODO: generate_dockerfile
 # TODO: generate_agents_script
-# TODO: main
 
 main() {
     require_command docker
-    die "Not implemented yet."
+
+    local agents="" stacks="" network="" repo_access="" docker_access="" persistence=""
+    FORCE=0
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --agent)         agents="$agents $2";       shift 2 ;;
+            --stack)         stacks="$stacks $2";       shift 2 ;;
+            --network)       network="$2";              shift 2 ;;
+            --repo-access)   repo_access="$2";          shift 2 ;;
+            --docker-access) docker_access="$2";        shift 2 ;;
+            --persistence)   persistence="$2";          shift 2 ;;
+            --force)         FORCE=1;                   shift ;;
+            *) die "Unknown flag: $1" ;;
+        esac
+    done
+
+    agents="$(echo "$agents"       | tr -s ' ' | sed 's/^ //;s/ $//')"
+    stacks="$(echo "$stacks"       | tr -s ' ' | sed 's/^ //;s/ $//')"
+
+    # TODO: wizard for missing values
+    # TODO: generate files
+
+    [ -z "$agents" ] && die "At least one agent is required (--agent claude|codex|pi|opencode)."
+    die "Generator not implemented yet."
 }
 
 main "$@"
