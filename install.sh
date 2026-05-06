@@ -120,7 +120,127 @@ require_command() {
         die "Required command not found: '$1'. Please install it and retry."
 }
 
-# TODO: generate_dockerfile
+# ── dockerfile generator ───────────────────────────────────────────────────────
+
+generate_dockerfile() {
+    local agents="$1"
+    local stacks="$2"
+    local network="$3"
+
+    local agent_list stack_list
+    agent_list="$(echo "$agents" | tr ' ' '+')"
+    if [ -n "$stacks" ]; then
+        stack_list="$(echo "$stacks" | tr ' ' '+')"
+        printf '# Container for %s / %s\n\n' "$agent_list" "$stack_list"
+    else
+        printf '# Container for %s\n\n' "$agent_list"
+    fi
+
+    [ "$network" = "offline" ] && \
+        printf '# network_mode: none — container has no internet access at runtime\n\n'
+
+    local need_go=0 need_rust=0
+    for stack in $stacks; do
+        [ "$stack" = "go" ]   && need_go=1
+        [ "$stack" = "rust" ] && need_rust=1
+    done
+
+    cat <<'EOF'
+FROM node:22-bookworm-slim
+
+# All tool caches land in /cache — mount one named volume to persist across runs
+EOF
+
+    if [ "$need_rust" = "1" ]; then
+        cat <<'EOF'
+ENV CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_TARGET_DIR=/cache/cargo-target \
+    GOMODCACHE=/cache/go/pkg/mod \
+    GOCACHE=/cache/go/build \
+    npm_config_cache=/cache/npm \
+    PNPM_HOME=/cache/pnpm/home \
+    XDG_CACHE_HOME=/cache/xdg \
+    UV_CACHE_DIR=/cache/uv
+EOF
+    else
+        cat <<'EOF'
+ENV CARGO_TARGET_DIR=/cache/cargo-target \
+    GOMODCACHE=/cache/go/pkg/mod \
+    GOCACHE=/cache/go/build \
+    npm_config_cache=/cache/npm \
+    PNPM_HOME=/cache/pnpm/home \
+    XDG_CACHE_HOME=/cache/xdg \
+    UV_CACHE_DIR=/cache/uv
+EOF
+    fi
+
+    printf '\nRUN apt-get update && apt-get install -y --no-install-recommends \\\n'
+    printf '        git curl ca-certificates jq less unzip \\\n'
+    printf '        ripgrep fd-find gh procps tmux'
+
+    for stack in $stacks; do
+        case "$stack" in
+            python) printf ' \\\n        python3 python3-venv python3-pip' ;;
+        esac
+    done
+
+    printf ' \\\n    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \\\n'
+    printf '    && rm -rf /var/lib/apt/lists/*\n'
+
+    if [ "$need_go" = "1" ]; then
+        cat <<'EOF'
+
+ARG GO_VERSION=1.23.4
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+        amd64) go_arch="amd64" ;; \
+        arm64) go_arch="arm64" ;; \
+        *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${go_arch}.tar.gz" -o /tmp/go.tgz \
+    && tar -C /usr/local -xzf /tmp/go.tgz \
+    && rm /tmp/go.tgz
+ENV PATH="/usr/local/go/bin:${PATH}"
+EOF
+    fi
+
+    if [ "$need_rust" = "1" ]; then
+        cat <<'EOF'
+
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
+    && chmod -R a+w "${CARGO_HOME}" "${RUSTUP_HOME}"
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
+EOF
+    fi
+
+    cat <<'EOF'
+
+RUN mkdir -p /cache /usr/local/share/npm-global \
+    && chown node:node /cache /usr/local/share/npm-global
+
+USER node
+
+ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
+ENV PATH="/usr/local/share/npm-global/bin:/home/node/.claude/local:${PATH}"
+
+EOF
+
+    local npm_agents="" need_claude=0
+    for agent in $agents; do
+        case "$agent" in
+            claude)   need_claude=1 ;;
+            codex)    npm_agents="$npm_agents @openai/codex" ;;
+            pi)       npm_agents="$npm_agents @earendil-works/pi-coding-agent" ;;
+            opencode) npm_agents="$npm_agents opencode-ai" ;;
+        esac
+    done
+    npm_agents="$(echo "$npm_agents" | sed 's/^ //')"
+
+    [ -n "$npm_agents" ]    && printf 'RUN npm install -g %s\n' "$npm_agents"
+    [ "$need_claude" = "1" ] && printf 'RUN curl -fsSL https://claude.ai/install.sh | bash\n'
+}
+
 # TODO: generate_agents_script
 
 main() {
