@@ -356,11 +356,103 @@ main() {
     agents="$(echo "$agents"       | tr -s ' ' | sed 's/^ //;s/ $//')"
     stacks="$(echo "$stacks"       | tr -s ' ' | sed 's/^ //;s/ $//')"
 
-    # TODO: wizard for missing values
-    # TODO: generate files
+    local need_wizard=0
+    [ -z "$agents" ]        && need_wizard=1
+    [ -z "$network" ]       && need_wizard=1
+    [ -z "$repo_access" ]   && need_wizard=1
+    [ -z "$docker_access" ] && need_wizard=1
+    [ -z "$persistence" ]   && need_wizard=1
+
+    if [ "$need_wizard" = "1" ]; then
+        check_tty
+
+        printf '\n'
+        say "AgentSandbox Setup"
+        printf '\nGenerates a Dockerfile + agents launcher for AI coding agents.\n'
+
+        if [ -z "$agents" ]; then
+            multi_select agents \
+                "Which agents?" \
+                "claude codex pi opencode" \
+                "1"
+        fi
+
+        if [ -z "$stacks" ]; then
+            multi_select stacks \
+                "Which language stacks? (optional)" \
+                "python node go rust"
+        fi
+
+        if [ -z "$network" ]; then
+            single_select network \
+                "Network access inside the container?" \
+                "full offline" \
+                "full"
+        fi
+
+        if [ -z "$repo_access" ]; then
+            single_select repo_access \
+                "Repository access?" \
+                "writable readonly empty" \
+                "writable"
+        fi
+
+        if [ -z "$docker_access" ]; then
+            single_select docker_access \
+                "Docker socket access?" \
+                "none docker-cli-only docker-socket" \
+                "none"
+        fi
+
+        if [ -z "$persistence" ]; then
+            single_select persistence \
+                "Agent cache persistence?" \
+                "keep-agent-cache disposable" \
+                "keep-agent-cache"
+        fi
+
+        printf '\n'
+    fi
 
     [ -z "$agents" ] && die "At least one agent is required (--agent claude|codex|pi|opencode)."
-    die "Generator not implemented yet."
+
+    : "${network:=full}"
+    : "${repo_access:=writable}"
+    : "${docker_access:=none}"
+    : "${persistence:=keep-agent-cache}"
+
+    backup_or_confirm_overwrite "Dockerfile"
+    backup_or_confirm_overwrite "agents"
+
+    say "Generating..."
+
+    generate_dockerfile "$agents" "$stacks" "$network" > Dockerfile
+    step "Dockerfile"
+
+    generate_agents_script "$agents" "$network" "$repo_access" "$docker_access" "$persistence" > agents
+    chmod +x agents
+    step "agents"
+
+    printf '\n'
+    say "Done. Next steps:\n"
+    printf '  1. Review the generated files:\n\n'
+    printf '       cat Dockerfile\n'
+    printf '       cat agents\n\n'
+    printf '  2. Launch an agent (image builds automatically on first run):\n\n'
+    for agent in $agents; do
+        printf '       ./agents %s\n' "$agent"
+    done
+    printf '\n'
+    printf '  Credentials mounted read-only from your host:\n\n'
+    for agent in $agents; do
+        case "$agent" in
+            claude)   printf '    Claude   → ~/.claude  ~/.claude.json\n' ;;
+            codex)    printf '    Codex    → ~/.codex\n' ;;
+            pi)       printf '    Pi       → ~/.pi\n' ;;
+            opencode) printf '    OpenCode → ~/.opencode  ~/.config/opencode\n' ;;
+        esac
+    done
+    printf '\n'
 }
 
 main "$@"
