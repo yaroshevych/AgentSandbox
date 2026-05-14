@@ -35,8 +35,9 @@ multi_select() {
     while true; do
         printf '\n%b%s%b\n' "${BOLD}" "$msg" "${RESET}" >"$TTY"
         printf '  %bOptions:%b  %s\n' "${DIM}" "${RESET}" "$opts" >"$TTY"
-        printf '  %bExample:%b  %s\n' "${DIM}" "${RESET}" \
-            "$(echo "$opts" | awk '{print $1, $2}')" >"$TTY"
+        local example
+        example="$(echo "$opts" | awk '{print $1, $2}')"
+        printf '  %bExample:%b  %s\n' "${DIM}" "${RESET}" "$example" >"$TTY"
         [ "$required" = "0" ] && \
             printf '  %b(press Enter to skip)%b\n' "${DIM}" "${RESET}" >"$TTY"
         printf '> ' >"$TTY"
@@ -235,9 +236,9 @@ EOF
             opencode) npm_agents="$npm_agents opencode-ai" ;;
         esac
     done
-    npm_agents="$(echo "$npm_agents" | sed 's/^ //')"
+    npm_agents="$(printf '%s' "$npm_agents" | sed 's/^ //')"
 
-    [ -n "$npm_agents" ]    && printf 'RUN npm install -g %s\n' "$npm_agents"
+    [ -n "$npm_agents" ]     && printf 'RUN npm install -g %s\n' "$npm_agents"
     [ "$need_claude" = "1" ] && printf 'RUN curl -fsSL https://claude.ai/install.sh | bash\n'
 }
 
