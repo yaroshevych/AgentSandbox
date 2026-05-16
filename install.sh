@@ -433,7 +433,7 @@ EOF
         case "$agent" in
             claude)   printf '    claude)   shift; run claude "$@" ;;\n' ;;
             codex)    printf '    codex)    shift; run codex "$@" ;;\n' ;;
-            pi)       printf '    pi)       shift; run pi-coding-agent "$@" ;;\n' ;;
+            pi)       printf '    pi)       shift; run pi "$@" ;;\n' ;;
             opencode) printf '    opencode) shift; run opencode "$@" ;;\n' ;;
         esac
     done

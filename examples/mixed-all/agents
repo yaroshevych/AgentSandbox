@@ -32,7 +32,7 @@ run() {
 case "${1:-}" in
     claude)   shift; run claude "$@" ;;
     codex)    shift; run codex "$@" ;;
-    pi)       shift; run pi-coding-agent "$@" ;;
+    pi)       shift; run pi "$@" ;;
     opencode) shift; run opencode "$@" ;;
     shell|"") run bash ;;
     *)        echo "Warning: unknown command '$1', dropping into shell" >&2; run bash ;;
