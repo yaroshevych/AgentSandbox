@@ -183,8 +183,9 @@ EOF
         esac
     done
 
-    [ "$network" = "block" ] && \
+    if [ "$network" = "block" ]; then
         printf ' \\\n        sudo iptables ipset iproute2 dnsutils aggregate'
+    fi
 
     printf ' \\\n    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \\\n'
     printf '    && rm -rf /var/lib/apt/lists/*\n'
@@ -249,8 +250,12 @@ EOF
     done
     npm_agents="$(printf '%s' "$npm_agents" | sed 's/^ //')"
 
-    [ -n "$npm_agents" ]     && printf 'RUN npm install -g %s\n' "$npm_agents"
-    [ "$need_claude" = "1" ] && printf 'RUN curl -fsSL https://claude.ai/install.sh | bash\n'
+    if [ -n "$npm_agents" ]; then
+        printf 'RUN npm install -g %s\n' "$npm_agents"
+    fi
+    if [ "$need_claude" = "1" ]; then
+        printf 'RUN curl -fsSL https://claude.ai/install.sh | bash\n'
+    fi
 }
 
 # ── firewall script generator ──────────────────────────────────────────────────
@@ -368,7 +373,9 @@ run() {
     docker run --rm -it \
 EOF
 
-    [ "$network" = "block" ] && printf '        --cap-add NET_ADMIN \\\n'
+    if [ "$network" = "block" ]; then
+        printf '        --cap-add NET_ADMIN \\\n'
+    fi
 
     case "$repo_access" in
         writable) printf '        -v "$(pwd):/workspace:cached" \\\n' ;;
@@ -529,7 +536,9 @@ main() {
 
     backup_or_confirm_overwrite "Dockerfile"
     backup_or_confirm_overwrite "agents"
-    [ "$network" = "block" ] && backup_or_confirm_overwrite "init-firewall.sh"
+    if [ "$network" = "block" ]; then
+        backup_or_confirm_overwrite "init-firewall.sh"
+    fi
 
     say "Generating..."
 
@@ -547,21 +556,18 @@ main() {
     fi
 
     printf '\n'
-    say "Done. Next steps:\n"
-    printf '  1. Review the generated files:\n\n'
-    printf '       cat Dockerfile\n'
-    printf '       cat agents\n'
-    [ "$network" = "block" ] && printf '       cat init-firewall.sh\n'
+    say "Done."
     printf '\n'
-    printf '  2. Launch an agent (image builds automatically on first run):\n\n'
+
+    printf '  Start an agent (builds the image automatically on first run):\n\n'
     for agent in $agents; do
-        printf '       ./agents %s\n' "$agent"
+        printf '    ./agents %s\n' "$agent"
     done
     printf '\n'
-    if [ "$network" = "block" ]; then
-        printf '  Network: blocked — only GitHub, npm, and agent APIs are reachable.\n'
-        printf '  Requires --cap-add NET_ADMIN (handled by the agents script).\n\n'
-    fi
+
+    printf '  Or drop into a shell:\n\n'
+    printf '    ./agents shell\n\n'
+
     printf '  Credentials mounted read-only from your host:\n\n'
     for agent in $agents; do
         case "$agent" in
@@ -572,6 +578,11 @@ main() {
         esac
     done
     printf '\n'
+
+    if [ "$network" = "block" ]; then
+        printf '  Network: blocked — GitHub, npm, and agent APIs only.\n'
+        printf '  Firewall runs inside the container on each launch.\n\n'
+    fi
 }
 
 main "$@"
