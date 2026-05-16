@@ -15,11 +15,12 @@ ensure_image() {
 run() {
     ensure_image
     docker run --rm -it \
+        --cap-add NET_ADMIN \
         -v "$(pwd):/workspace:cached" \
-        --network none \
+        -v agentsandbox-cache:/cache \
         -v "$HOME/.codex:/home/node/.codex:ro" \
         -w /workspace \
-        "$IMAGE" "$@"
+        "$IMAGE" bash -c 'sudo /usr/local/bin/init-firewall.sh && exec "$@"' -- "$@"
 }
 
 case "${1:-}" in

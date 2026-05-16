@@ -22,7 +22,7 @@ check_tty() {
     [ -c "$TTY" ] || die \
 "No interactive terminal. Run in a terminal, or pass all flags to skip the wizard:
   --agent <claude|codex|pi|opencode>  (repeatable)
-  --network <full|offline>
+  --network <allow|block>
   --repo-access <writable|readonly|empty>
   --docker-access <none|docker-cli-only|docker-socket>
   --persistence <keep-agent-cache|disposable>"
@@ -137,9 +137,6 @@ generate_dockerfile() {
         printf '# Container for %s\n\n' "$agent_list"
     fi
 
-    [ "$network" = "offline" ] && \
-        printf '# network_mode: none — container has no internet access at runtime\n\n'
-
     local need_go=0 need_rust=0
     for stack in $stacks; do
         [ "$stack" = "go" ]   && need_go=1
@@ -186,6 +183,9 @@ EOF
         esac
     done
 
+    [ "$network" = "block" ] && \
+        printf ' \\\n        sudo iptables ipset iproute2 dnsutils aggregate'
+
     printf ' \\\n    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \\\n'
     printf '    && rm -rf /var/lib/apt/lists/*\n'
 
@@ -215,6 +215,17 @@ ENV PATH="${CARGO_HOME}/bin:${PATH}"
 EOF
     fi
 
+    if [ "$network" = "block" ]; then
+        cat <<'EOF'
+
+COPY init-firewall.sh /usr/local/bin/init-firewall.sh
+RUN chmod +x /usr/local/bin/init-firewall.sh \
+    && echo "node ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh" \
+       > /etc/sudoers.d/node-firewall \
+    && chmod 0440 /etc/sudoers.d/node-firewall
+EOF
+    fi
+
     cat <<'EOF'
 
 RUN mkdir -p /cache /usr/local/share/npm-global \
@@ -240,6 +251,92 @@ EOF
 
     [ -n "$npm_agents" ]     && printf 'RUN npm install -g %s\n' "$npm_agents"
     [ "$need_claude" = "1" ] && printf 'RUN curl -fsSL https://claude.ai/install.sh | bash\n'
+}
+
+# ── firewall script generator ──────────────────────────────────────────────────
+
+generate_firewall_script() {
+    local agents="$1"
+
+    local allowed_domains="registry.npmjs.org"
+    for agent in $agents; do
+        case "$agent" in
+            claude)   allowed_domains="$allowed_domains api.anthropic.com statsig.anthropic.com statsig.com sentry.io" ;;
+            codex)    allowed_domains="$allowed_domains api.openai.com" ;;
+        esac
+    done
+
+    cat <<'EOF'
+#!/bin/bash
+# Network firewall — allows GitHub, npm, and agent API endpoints; blocks everything else
+# Runs inside the container via: sudo /usr/local/bin/init-firewall.sh
+set -euo pipefail
+IFS=$'\n\t'
+
+EOF
+
+    printf 'ALLOWED_DOMAINS="%s"\n' "$allowed_domains"
+
+    for agent in $agents; do
+        case "$agent" in
+            pi)       printf '# TODO: add Pi agent API domain to ALLOWED_DOMAINS\n' ;;
+            opencode) printf '# TODO: add OpenCode API domain to ALLOWED_DOMAINS\n' ;;
+        esac
+    done
+
+    cat <<'EOF'
+
+DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127.0.0.11" || true)
+
+iptables -F; iptables -X
+iptables -t nat -F; iptables -t nat -X
+iptables -t mangle -F; iptables -t mangle -X
+ipset destroy allowed-domains 2>/dev/null || true
+
+if [ -n "$DOCKER_DNS_RULES" ]; then
+    iptables -t nat -N DOCKER_OUTPUT 2>/dev/null || true
+    iptables -t nat -N DOCKER_POSTROUTING 2>/dev/null || true
+    echo "$DOCKER_DNS_RULES" | xargs -L 1 iptables -t nat
+fi
+
+iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+iptables -A INPUT  -p udp --sport 53 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 22 -j ACCEPT
+iptables -A INPUT  -p tcp --sport 22 -m state --state ESTABLISHED -j ACCEPT
+iptables -A INPUT  -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+
+ipset create allowed-domains hash:net
+
+echo "Fetching GitHub IP ranges..."
+gh_ranges=$(curl -s https://api.github.com/meta)
+[ -z "$gh_ranges" ] && { echo "ERROR: Failed to fetch GitHub IP ranges"; exit 1; }
+while read -r cidr; do
+    ipset add allowed-domains "$cidr"
+done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' | aggregate -q)
+
+for domain in $ALLOWED_DOMAINS; do
+    echo "Resolving $domain..."
+    while read -r ip; do
+        ipset add allowed-domains "$ip" 2>/dev/null || true
+    done < <(dig +noall +answer A "$domain" | awk '$4=="A"{print $5}')
+done
+
+HOST_IP=$(ip route | grep default | cut -d" " -f3)
+HOST_NETWORK=$(echo "$HOST_IP" | sed 's/\.[0-9]*$/.0\/24/')
+
+iptables -A INPUT  -s "$HOST_NETWORK" -j ACCEPT
+iptables -A OUTPUT -d "$HOST_NETWORK" -j ACCEPT
+iptables -P INPUT   DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT  DROP
+iptables -A INPUT  -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
+iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
+
+echo "Firewall active — GitHub, npm, and agent APIs allowed."
+EOF
 }
 
 # ── agents script generator ────────────────────────────────────────────────────
@@ -271,6 +368,8 @@ run() {
     docker run --rm -it \
 EOF
 
+    [ "$network" = "block" ] && printf '        --cap-add NET_ADMIN \\\n'
+
     case "$repo_access" in
         writable) printf '        -v "$(pwd):/workspace:cached" \\\n' ;;
         readonly) printf '        -v "$(pwd):/workspace:ro,cached" \\\n' ;;
@@ -284,10 +383,6 @@ EOF
     case "$docker_access" in
         docker-socket|docker-cli-only)
             printf '        -v /var/run/docker.sock:/var/run/docker.sock \\\n' ;;
-    esac
-
-    case "$network" in
-        offline) printf '        --network none \\\n' ;;
     esac
 
     for agent in $agents; do
@@ -311,13 +406,21 @@ EOF
         esac
     done
 
-    cat <<'EOF'
+    if [ "$network" = "block" ]; then
+        cat <<'EOF'
+        -w /workspace \
+        "$IMAGE" bash -c 'sudo /usr/local/bin/init-firewall.sh && exec "$@"' -- "$@"
+}
+EOF
+    else
+        cat <<'EOF'
         -w /workspace \
         "$IMAGE" "$@"
 }
-
-case "${1:-}" in
 EOF
+    fi
+
+    printf '\ncase "${1:-}" in\n'
 
     for agent in $agents; do
         case "$agent" in
@@ -334,6 +437,8 @@ EOF
 esac
 EOF
 }
+
+# ── main ──────────────────────────────────────────────────────────────────────
 
 main() {
     require_command docker
@@ -354,8 +459,8 @@ main() {
         esac
     done
 
-    agents="$(echo "$agents"       | tr -s ' ' | sed 's/^ //;s/ $//')"
-    stacks="$(echo "$stacks"       | tr -s ' ' | sed 's/^ //;s/ $//')"
+    agents="$(echo "$agents" | tr -s ' ' | sed 's/^ //;s/ $//')"
+    stacks="$(echo "$stacks"  | tr -s ' ' | sed 's/^ //;s/ $//')"
 
     local need_wizard=0
     [ -z "$agents" ]        && need_wizard=1
@@ -387,8 +492,8 @@ main() {
         if [ -z "$network" ]; then
             single_select network \
                 "Network access inside the container?" \
-                "full offline" \
-                "full"
+                "allow block" \
+                "allow"
         fi
 
         if [ -z "$repo_access" ]; then
@@ -417,13 +522,14 @@ main() {
 
     [ -z "$agents" ] && die "At least one agent is required (--agent claude|codex|pi|opencode)."
 
-    : "${network:=full}"
+    : "${network:=allow}"
     : "${repo_access:=writable}"
     : "${docker_access:=none}"
     : "${persistence:=keep-agent-cache}"
 
     backup_or_confirm_overwrite "Dockerfile"
     backup_or_confirm_overwrite "agents"
+    [ "$network" = "block" ] && backup_or_confirm_overwrite "init-firewall.sh"
 
     say "Generating..."
 
@@ -434,16 +540,28 @@ main() {
     chmod +x agents
     step "agents"
 
+    if [ "$network" = "block" ]; then
+        generate_firewall_script "$agents" > init-firewall.sh
+        chmod +x init-firewall.sh
+        step "init-firewall.sh"
+    fi
+
     printf '\n'
     say "Done. Next steps:\n"
     printf '  1. Review the generated files:\n\n'
     printf '       cat Dockerfile\n'
-    printf '       cat agents\n\n'
+    printf '       cat agents\n'
+    [ "$network" = "block" ] && printf '       cat init-firewall.sh\n'
+    printf '\n'
     printf '  2. Launch an agent (image builds automatically on first run):\n\n'
     for agent in $agents; do
         printf '       ./agents %s\n' "$agent"
     done
     printf '\n'
+    if [ "$network" = "block" ]; then
+        printf '  Network: blocked — only GitHub, npm, and agent APIs are reachable.\n'
+        printf '  Requires --cap-add NET_ADMIN (handled by the agents script).\n\n'
+    fi
     printf '  Credentials mounted read-only from your host:\n\n'
     for agent in $agents; do
         case "$agent" in
