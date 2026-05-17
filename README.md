@@ -3,7 +3,7 @@
 One command launches a shell wizard that generates hardened, inspectable Docker sandboxes for AI coding agents.
 
 ```sh
-curl -fsSL https://agentsandbox.dev/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/yaroshevych/AgentSandbox/main/install.sh | bash
 ./agents claude
 ```
 
@@ -48,10 +48,10 @@ The container image builds automatically the first time you run `./agents`.
 If you have all choices ready, bypass the wizard by passing flags:
 
 ```sh
-curl -fsSL https://agentsandbox.dev/install.sh | sh -s -- \
+curl -fsSL https://raw.githubusercontent.com/yaroshevych/AgentSandbox/main/install.sh | bash -s -- \
   --agent claude \
   --stack python \
-  --network full \
+  --network allow \
   --repo-access writable \
   --docker-access none \
   --persistence keep-agent-cache
@@ -65,13 +65,12 @@ The installer never:
 - runs `sudo`
 - installs anything globally
 - modifies files outside the current directory
-- runs Docker or any agent automatically
 
 Inspect before running:
 
 ```sh
-curl -fsSL https://agentsandbox.dev/install.sh        # read it
-curl -fsSL https://agentsandbox.dev/install.sh | sh   # then run it
+curl -fsSL https://raw.githubusercontent.com/yaroshevych/AgentSandbox/main/install.sh        # read it
+curl -fsSL https://raw.githubusercontent.com/yaroshevych/AgentSandbox/main/install.sh | bash   # then run it
 ```
 
 ## License
