@@ -1,4 +1,7 @@
 .DS_Store
 *.swp
 *.swo
-ooo/
+/Dockerfile
+/agents
+/init-firewall.sh
+/.claude
