@@ -589,7 +589,7 @@ main() {
     printf '\n'
 
     printf '  Or drop into a shell:\n\n'
-    printf '    ./agents shell\n\n'
+    printf '    ./agents\n\n'
 
     printf '  Credentials mounted from your host:\n\n'
     for agent in $agents; do
