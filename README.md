@@ -74,14 +74,6 @@ curl -fsSL https://agentsandbox.dev/install.sh        # read it
 curl -fsSL https://agentsandbox.dev/install.sh | sh   # then run it
 ```
 
-## Examples
-
-See [`examples/`](examples/) for pre-generated configurations:
-
-- [`mixed-all/`](examples/mixed-all/) — all four agents, all stacks
-- [`rust-claude/`](examples/rust-claude/) — Claude + Rust
-- [`python-codex-offline/`](examples/python-codex-offline/) — Codex + Python, air-gapped
-
 ## License
 
 MIT
