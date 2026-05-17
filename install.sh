@@ -235,7 +235,8 @@ RUN mkdir -p /cache /usr/local/share/npm-global \
 USER node
 
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
-ENV PATH="/usr/local/share/npm-global/bin:/home/node/.claude/local:${PATH}"
+ENV PATH="/usr/local/share/npm-global/bin:/home/node/.local/bin:/home/node/.claude/local:${PATH}"
+RUN echo 'PS1="agent-sandbox# "' >> /home/node/.bashrc
 
 EOF
 
@@ -263,13 +264,18 @@ EOF
 generate_firewall_script() {
     local agents="$1"
 
-    local allowed_domains="registry.npmjs.org"
+    # Build deduplicated domain list
+    local raw_domains="registry.npmjs.org"
     for agent in $agents; do
         case "$agent" in
-            claude)   allowed_domains="$allowed_domains api.anthropic.com statsig.anthropic.com statsig.com sentry.io" ;;
-            codex)    allowed_domains="$allowed_domains api.openai.com" ;;
+            claude)   raw_domains="$raw_domains api.anthropic.com statsig.com sentry.io" ;;
+            codex)    raw_domains="$raw_domains api.openai.com chatgpt.com" ;;
+            pi)       raw_domains="$raw_domains api.anthropic.com api.openai.com" ;;
+            opencode) raw_domains="$raw_domains api.anthropic.com api.openai.com" ;;
         esac
     done
+    local allowed_domains
+    allowed_domains="$(printf '%s\n' $raw_domains | sort -u | tr '\n' ' ' | sed 's/ $//')"
 
     cat <<'EOF'
 #!/bin/bash
@@ -278,20 +284,9 @@ generate_firewall_script() {
 set -euo pipefail
 IFS=$'\n\t'
 
-EOF
+die() { echo "ERROR: $*" >&2; exit 1; }
 
-    printf 'ALLOWED_DOMAINS="%s"\n' "$allowed_domains"
-
-    for agent in $agents; do
-        case "$agent" in
-            pi)       printf '# TODO: add Pi agent API domain to ALLOWED_DOMAINS\n' ;;
-            opencode) printf '# TODO: add OpenCode API domain to ALLOWED_DOMAINS\n' ;;
-        esac
-    done
-
-    cat <<'EOF'
-
-DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127.0.0.11" || true)
+DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
 
 iptables -F; iptables -X
 iptables -t nat -F; iptables -t nat -X
@@ -313,21 +308,33 @@ iptables -A OUTPUT -o lo -j ACCEPT
 
 ipset create allowed-domains hash:net
 
-echo "Fetching GitHub IP ranges..."
 gh_ranges=$(curl -s https://api.github.com/meta)
-[ -z "$gh_ranges" ] && { echo "ERROR: Failed to fetch GitHub IP ranges"; exit 1; }
+[ -z "$gh_ranges" ] && die "Failed to fetch GitHub IP ranges"
+echo "$gh_ranges" | jq -e '.web and .api and .git' >/dev/null || die "GitHub API response missing required fields"
 while read -r cidr; do
+    [[ "$cidr" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]] || die "Invalid CIDR from GitHub meta: $cidr"
     ipset add allowed-domains "$cidr"
 done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' | aggregate -q)
 
-for domain in $ALLOWED_DOMAINS; do
-    echo "Resolving $domain..."
+EOF
+
+    printf 'for domain in \\\n'
+    for domain in $allowed_domains; do
+        printf '    "%s" \\\n' "$domain"
+    done
+    printf '    ; do\n'
+
+    cat <<'EOF'
+    ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
+    [ -z "$ips" ] && die "Failed to resolve $domain"
     while read -r ip; do
+        [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || die "Invalid IP for $domain: $ip"
         ipset add allowed-domains "$ip" 2>/dev/null || true
-    done < <(dig +noall +answer A "$domain" | awk '$4=="A"{print $5}')
+    done < <(echo "$ips")
 done
 
 HOST_IP=$(ip route | grep default | cut -d" " -f3)
+[ -z "$HOST_IP" ] && die "Failed to detect host IP"
 HOST_NETWORK=$(echo "$HOST_IP" | sed 's/\.[0-9]*$/.0\/24/')
 
 iptables -A INPUT  -s "$HOST_NETWORK" -j ACCEPT
@@ -340,7 +347,9 @@ iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 
-echo "Firewall active — GitHub, npm, and agent APIs allowed."
+curl --connect-timeout 5 https://example.com >/dev/null 2>&1 && die "Firewall check failed — able to reach example.com"
+curl --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1 || die "Firewall check failed — unable to reach api.github.com"
+echo "Firewall active."
 EOF
 }
 
@@ -392,35 +401,45 @@ EOF
             printf '        -v /var/run/docker.sock:/var/run/docker.sock \\\n' ;;
     esac
 
+    printf '        -e CLAUDE_CONFIG_DIR=/home/node/.claude-config \\\n'
+    printf '        -e XDG_CONFIG_HOME=/home/node/.config \\\n'
+    printf '        -e XDG_DATA_HOME=/home/node/.local/share \\\n'
+    printf '        -e XDG_STATE_HOME=/home/node/.local/state \\\n'
+    printf '        -e XDG_CACHE_HOME=/home/node/.cache \\\n'
+
     for agent in $agents; do
         case "$agent" in
             claude)
-                printf '        -v "$HOME/.claude:/home/node/.claude:ro" \\\n'
-                printf '        -v "$HOME/.claude.json:/home/node/.claude.json:ro" \\\n'
+                printf '        -v "$HOME/.claude:/home/node/.claude-config" \\\n'
+                printf '        -v "$HOME/.claude.json:/home/node/.claude.json" \\\n'
+                printf '        -v "$HOME/.claude.json:/home/node/.claude-config/.claude.json" \\\n'
                 ;;
             codex)
-                printf '        -v "$HOME/.codex:/home/node/.codex:ro" \\\n'
+                printf '        -v "$HOME/.codex:/home/node/.codex" \\\n'
                 ;;
             pi)
-                printf '        -v "$HOME/.pi:/home/node/.pi:ro" \\\n'
+                printf '        -v "$HOME/.pi:/home/node/.pi" \\\n'
                 ;;
             opencode)
-                printf '        -v "$HOME/.opencode:/home/node/.opencode:ro" \\\n'
-                printf '        -v "$HOME/.config/opencode:/home/node/.config/opencode:ro" \\\n'
-                printf '        -v "$HOME/.local/share/opencode:/home/node/.local/share/opencode:ro" \\\n'
-                printf '        -v "$HOME/.local/state/opencode:/home/node/.local/state/opencode:ro" \\\n'
+                printf '        -v "$HOME/.opencode:/home/node/.opencode" \\\n'
+                printf '        -v "$HOME/.config/opencode:/home/node/.config/opencode" \\\n'
+                printf '        -v "$HOME/.local/share/opencode:/home/node/.local/share/opencode" \\\n'
+                printf '        -v "$HOME/.local/state/opencode:/home/node/.local/state/opencode" \\\n'
+                printf '        -v "$HOME/.cache/opencode:/home/node/.cache/opencode" \\\n'
                 ;;
         esac
     done
 
     if [ "$network" = "block" ]; then
         cat <<'EOF'
+        --entrypoint "" \
         -w /workspace \
         "$IMAGE" bash -c 'sudo /usr/local/bin/init-firewall.sh && exec "$@"' -- "$@"
 }
 EOF
     else
         cat <<'EOF'
+        --entrypoint "" \
         -w /workspace \
         "$IMAGE" "$@"
 }
@@ -556,10 +575,14 @@ main() {
     fi
 
     printf '\n'
+    say "Building image..."
+    docker build -t agentsandbox -f Dockerfile .
+
+    printf '\n'
     say "Done."
     printf '\n'
 
-    printf '  Start an agent (builds the image automatically on first run):\n\n'
+    printf '  Start an agent:\n\n'
     for agent in $agents; do
         printf '    ./agents %s\n' "$agent"
     done
@@ -568,7 +591,7 @@ main() {
     printf '  Or drop into a shell:\n\n'
     printf '    ./agents shell\n\n'
 
-    printf '  Credentials mounted read-only from your host:\n\n'
+    printf '  Credentials mounted from your host:\n\n'
     for agent in $agents; do
         case "$agent" in
             claude)   printf '    Claude   → ~/.claude  ~/.claude.json\n' ;;
